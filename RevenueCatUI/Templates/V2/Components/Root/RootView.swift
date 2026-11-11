@@ -44,6 +44,13 @@ struct RootView: View {
     @State private var packageBeforeOpeningSheet: Package?
     @State private var overlaidHeaderHeight: CGFloat = 0
     @State private var overlaidFooterHeight: CGFloat = 0
+    @State private var footerIdealHeight: CGFloat = 0
+
+    @ScaledMetric(relativeTo: .body)
+    private var minimumContentHeight: CGFloat = 120
+
+    @Environment(\.layoutDirection)
+    private var layoutDirection
 
     internal init(
         viewModel: RootViewModel,
@@ -113,16 +120,35 @@ struct RootView: View {
             // Overlay the footer while reserving its measured height in the main content.
             .overlay(alignment: .bottom) {
                 if let stickyFooterViewModel = viewModel.stickyFooterViewModel {
-                    StackComponentView(
-                        viewModel: stickyFooterViewModel.stackViewModel,
-                        onDismiss: onDismiss,
-                        additionalPadding: EdgeInsets(top: 0, leading: 0, bottom: safeAreaInsets.bottom, trailing: 0)
-                    )
-                    .fixedSize(horizontal: false, vertical: true)
-                    .onSizeChange { overlaidFooterHeight = $0.height }
+                    GeometryReader { geometry in
+                        let frame = StickyFooterLayout.frame(
+                            in: CGRect(origin: .zero, size: geometry.size),
+                            idealHeight: self.footerIdealHeight,
+                            minimumContentHeight: self.minimumContentHeight,
+                            avoiding: self.footerDivisions(in: geometry)
+                        )
+                        ScrollView(.vertical) {
+                            StackComponentView(
+                                viewModel: stickyFooterViewModel.stackViewModel,
+                                onDismiss: onDismiss,
+                                additionalPadding: EdgeInsets(
+                                    top: 0, leading: 0, bottom: safeAreaInsets.bottom, trailing: 0
+                                )
+                            )
+                            .fixedSize(horizontal: false, vertical: true)
+                            .onSizeChange { self.footerIdealHeight = $0.height }
+                        }
+                        .frame(width: frame.width, height: frame.height)
+                        .position(x: frame.midX, y: frame.midY)
+                        .preference(
+                            key: OverlaidFooterHeightKey.self,
+                            value: geometry.size.height - frame.minY
+                        )
+                    }
                 }
             }
         }
+        .onPreferenceChange(OverlaidFooterHeightKey.self) { self.overlaidFooterHeight = $0 }
         .environment(\.paywallRootStackIsZLayer, self.paywallRootStackIsZLayer)
         .environment(\.openSheet, { sheet in
             self.sheetViewModel = sheet
@@ -169,6 +195,24 @@ struct RootView: View {
         }
     }
 
+    private func footerDivisions(in geometry: GeometryProxy) -> [CGRect] {
+        #if compiler(>=6.4.2) && os(iOS) && !targetEnvironment(macCatalyst)
+        if #available(iOS 27.1, *) {
+            return geometry.reservedRegions(kind: .division, layoutDirectionBehavior: .fixed).map { region in
+                let left = self.layoutDirection == .leftToRight ? region.margins.leading : region.margins.trailing
+                let right = self.layoutDirection == .leftToRight ? region.margins.trailing : region.margins.leading
+                return CGRect(
+                    x: region.frame.minX - left,
+                    y: region.frame.minY - region.margins.top,
+                    width: region.frame.width + left + right,
+                    height: region.frame.height + region.margins.top + region.margins.bottom
+                )
+            }
+        }
+        #endif
+        return []
+    }
+
     /// Returns the package that should be selected after a selection sheet is dismissed.
     ///
     /// In a workflow context the view snapshots the pre-sheet selection on open; this restores
@@ -190,6 +234,13 @@ struct RootView: View {
 /// PreferenceKey that propagates the measured height of the overlaid header.
 @available(iOS 15.0, macOS 12.0, tvOS 15.0, watchOS 8.0, *)
 private struct OverlaidHeaderHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct OverlaidFooterHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
