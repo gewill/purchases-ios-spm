@@ -40,6 +40,13 @@ struct RootView: View {
     @State private var nativeHeaderCollapsed = false
     @State private var visibleBodyHero = false
     @State private var overlaidFooterHeight: CGFloat = 0
+    @State private var footerIdealHeight: CGFloat = 0
+
+    @ScaledMetric(relativeTo: .body)
+    private var minimumContentHeight: CGFloat = 120
+
+    @Environment(\.layoutDirection)
+    private var layoutDirection
 
     internal init(
         viewModel: RootViewModel,
@@ -133,29 +140,64 @@ struct RootView: View {
             // Overlay the footer while reserving its measured height in the main content.
             .overlay(alignment: .bottom) {
                 if let stickyFooterViewModel = viewModel.stickyFooterViewModel {
-                    StackComponentView(
-                        viewModel: stickyFooterViewModel.stackViewModel,
-                        onDismiss: onDismiss,
-                        additionalPadding: EdgeInsets(
-                            top: 0,
-                            leading: 0,
-                            bottom: Self.stickyFooterBottomPadding(
-                                safeAreaBottom: safeAreaInsets.bottom,
-                                idiom: self.userInterfaceIdiom
-                            ),
-                            trailing: 0
+                    GeometryReader { geometry in
+                        let frame = StickyFooterLayout.frame(
+                            in: CGRect(origin: .zero, size: geometry.size),
+                            idealHeight: self.footerIdealHeight,
+                            minimumContentHeight: self.minimumContentHeight,
+                            avoiding: self.footerDivisions(in: geometry)
                         )
-                    )
-                    .fixedSize(horizontal: false, vertical: true)
-                    .onSizeChange { overlaidFooterHeight = $0.height }
+                        ScrollView(.vertical) {
+                            StackComponentView(
+                                viewModel: stickyFooterViewModel.stackViewModel,
+                                onDismiss: onDismiss,
+                                additionalPadding: EdgeInsets(
+                                    top: 0,
+                                    leading: 0,
+                                    bottom: Self.stickyFooterBottomPadding(
+                                        safeAreaBottom: safeAreaInsets.bottom,
+                                        idiom: self.userInterfaceIdiom
+                                    ),
+                                    trailing: 0
+                                )
+                            )
+                            .fixedSize(horizontal: false, vertical: true)
+                            .onSizeChange { self.footerIdealHeight = $0.height }
+                        }
+                        .frame(width: frame.width, height: frame.height)
+                        .position(x: frame.midX, y: frame.midY)
+                        .preference(
+                            key: OverlaidFooterHeightKey.self,
+                            value: geometry.size.height - frame.minY
+                        )
+                    }
                 }
             }
         }
+        .onPreferenceChange(OverlaidFooterHeightKey.self) { self.overlaidFooterHeight = $0 }
         .environment(\.paywallRootStackIsZLayer, self.paywallRootStackIsZLayer)
         .onPreferenceChange(NativePaywallCollapsedHeaderKey.self) { self.nativeHeaderCollapsed = $0 }
         .modifier(RootPackageSelectionSheetModifier(defaultPackage: self.defaultPackage))
         // The body owns this resolution; sheets and footers have independent layout roots.
         .environment(\.paywallHeroLayout, nil)
+    }
+
+    private func footerDivisions(in geometry: GeometryProxy) -> [CGRect] {
+        #if compiler(>=6.4.2) && os(iOS) && !targetEnvironment(macCatalyst)
+        if #available(iOS 27.1, *) {
+            return geometry.reservedRegions(kind: .division, layoutDirectionBehavior: .fixed).map { region in
+                let left = self.layoutDirection == .leftToRight ? region.margins.leading : region.margins.trailing
+                let right = self.layoutDirection == .leftToRight ? region.margins.trailing : region.margins.leading
+                return CGRect(
+                    x: region.frame.minX - left,
+                    y: region.frame.minY - region.margins.top,
+                    width: region.frame.width + left + right,
+                    height: region.frame.height + region.margins.top + region.margins.bottom
+                )
+            }
+        }
+        #endif
+        return []
     }
 
     /// Restores the selection from before the sheet opened, falling back to the page default
@@ -167,6 +209,13 @@ struct RootView: View {
         return packageBeforeOpeningSheet ?? defaultPackage
     }
 
+}
+
+private struct OverlaidFooterHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
 }
 
 /// Owns the sheet selection lifetime independently of the page's layout and tab renderings.
